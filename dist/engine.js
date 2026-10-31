@@ -21,9 +21,26 @@ function components(a,w,h,min=0){let seen=new Uint8Array(a.length),q=new Int32Ar
 // Suppress diagonal-only contact: these point contacts produce nonmanifold solids.
 function fixDiagonals(a,w,h){let changed=0;for(let y=0;y<h-1;y++)for(let x=0;x<w-1;x++){let i=y*w+x,A=a[i]>=0,B=a[i+1]>=0,C=a[i+w]>=0,D=a[i+w+1]>=0;if(A&&D&&!B&&!C){a[i+1]=a[i];changed++;}else if(B&&C&&!A&&!D){a[i]=a[i+1];changed++;}}return changed;}
 function validateHeights(palette,layer){if(palette.length<1)throw Error('La imagen no tiene zonas visibles. Ajusta el fondo o carga otro archivo.');let heights=palette.map(p=>p.height);for(const z of heights){if(!Number.isFinite(z)||z<.8||z>12)throw Error('Usa alturas entre 0.8 y 12 mm.');if(Math.abs(z/layer-Math.round(z/layer))>1e-5)throw Error('Cada altura debe ser múltiplo de la altura de capa.');}if(new Set(heights).size!==heights.length)throw Error('Asigna una altura distinta a cada color.');return heights.slice().sort((a,b)=>a-b);}
-function buildMesh(field,w,h,pitch,levels,band=null){
+// Shared XY deformation for every Z plane and every export band. Relax only
+// degree-two contour vertices; preserve junctions and check all cell triangles.
+function smoothContours(field,w,h,strength=.85){
+ const stride=w+1,xy=new Float64Array(stride*(h+1)*2),neighbors=new Map();
+ for(let y=0;y<=h;y++)for(let x=0;x<=w;x++){let i=(y*stride+x)*2;xy[i]=x;xy[i+1]=y;}
+ const link=(a,b)=>{if(!neighbors.has(a))neighbors.set(a,new Set());if(!neighbors.has(b))neighbors.set(b,new Set());neighbors.get(a).add(b);neighbors.get(b).add(a);};
+ const val=(x,y)=>x<0||y<0||x>=w||y>=h?0:field[y*w+x];
+ for(let y=0;y<=h;y++)for(let x=0;x<w;x++)if(val(x,y-1)!==val(x,y))link(y*stride+x,y*stride+x+1);
+ for(let y=0;y<h;y++)for(let x=0;x<=w;x++)if(val(x-1,y)!==val(x,y))link(y*stride+x,(y+1)*stride+x);
+ const movable=[...neighbors].filter(([,n])=>n.size===2).map(([i,n])=>[i,...n]);
+ const limit=.45*Math.max(0,Math.min(1,strength));
+ for(let pass=0;pass<8&&limit>0;pass++){let next=[];for(const [i,a,b] of movable){let ox=i%stride,oy=(i/stride)|0;next.push([i,Math.max(ox-limit,Math.min(ox+limit,xy[i*2]*.35+(xy[a*2]+xy[b*2])*.325)),Math.max(oy-limit,Math.min(oy+limit,xy[i*2+1]*.35+(xy[a*2+1]+xy[b*2+1])*.325))]);}for(const [i,x,y] of next){xy[i*2]=x;xy[i*2+1]=y;}}
+ const area=(a,b,c)=>(xy[b*2]-xy[a*2])*(xy[c*2+1]-xy[a*2+1])-(xy[b*2+1]-xy[a*2+1])*(xy[c*2]-xy[a*2]);
+ // Guard narrow details against flipped/zero-area faces after relaxation.
+ for(let pass=0;pass<8;pass++){let bad=new Set();for(let y=0;y<h;y++)for(let x=0;x<w;x++){let a=y*stride+x,b=a+1,d=a+stride,c=d+1;if(area(a,b,c)<.015||area(a,c,d)<.015){bad.add(a);bad.add(b);bad.add(c);bad.add(d);}}if(!bad.size)break;for(const i of bad){xy[i*2]=i%stride;xy[i*2+1]=(i/stride)|0;}}
+ return xy;
+}
+function buildMesh(field,w,h,pitch,levels,band=null,contours=null){
  const positions=[],faces=[],vertexMap=new Map(),faceColors=[];
- const vertex=(x,y,k)=>{const key=(k*(h+1)+y)*(w+1)+x;let id=vertexMap.get(key);if(id!==undefined)return id;id=positions.length/3;vertexMap.set(key,id);positions.push(x*pitch,y*pitch,levels[k]);return id;};
+ const vertex=(x,y,k)=>{const key=(k*(h+1)+y)*(w+1)+x;let id=vertexMap.get(key);if(id!==undefined)return id;id=positions.length/3;vertexMap.set(key,id);const q=(y*(w+1)+x)*2;positions.push((contours?contours[q]:x)*pitch,(contours?contours[q+1]:y)*pitch,levels[k]);return id;};
  const quad=(a,b,c,d,color)=>{faces.push(a,b,c,a,c,d);faceColors.push(color,color);};
  const value=(x,y)=>x<0||y<0||x>=w||y>=h?0:field[y*w+x];
  for(let y=0;y<h;y++)for(let x=0;x<w;x++){
@@ -49,5 +66,5 @@ function threeMF(meshes,palette,layer,target,guide){
  const settings={layer_height:String(layer),initial_layer_print_height:String(layer),filament_colour:palette.map(p=>p.color.toUpperCase()),filament_type:palette.map(()=>'PLA'),filament_settings_id:palette.map((p,i)=>`Paracord color ${i+1}`),filament_diameter:palette.map(()=>'1.75')};
  return zip([['[Content_Types].xml','<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/><Default Extension="config" ContentType="application/octet-stream"/><Default Extension="txt" ContentType="text/plain"/></Types>'],['_rels/.rels','<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>'],['3D/3dmodel.model',model],['Metadata/model_settings.config',config],['Metadata/project_settings.config',JSON.stringify(settings)],['Metadata/Paracord_instrucciones.txt',guide+`\nDestino seleccionado: ${target}.\n`]]);
 }
-root.CharmEngine={rgb,hex,removeExterior,quantize,labels,components,fixDiagonals,validateHeights,buildMesh,stl,threeMF,zip};if(typeof module!=='undefined')module.exports=root.CharmEngine;
+root.CharmEngine={rgb,hex,removeExterior,quantize,labels,components,fixDiagonals,validateHeights,smoothContours,buildMesh,stl,threeMF,zip};if(typeof module!=='undefined')module.exports=root.CharmEngine;
 })(typeof window!=='undefined'?window:globalThis);
