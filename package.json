@@ -1,0 +1,8 @@
+{
+  "name": "paracord-charm",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Generador de charms por alturas desde PNG y SVG",
+  "scripts": { "test": "node test-engine.cjs" },
+  "engines": { "node": ">=18" }
+}
